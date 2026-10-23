@@ -4,6 +4,8 @@ import json
 import os
 import threading
 import zlib
+import time
+import urllib.request
 
 from base_plugin import (
     AppEvent,
@@ -74,6 +76,26 @@ Process = jclass("android.os.Process")
 LocaleController = jclass("org.telegram.messenger.LocaleController")
 
 _TRANSLATIONS = {
+    "components_installed": (
+        "Компоненты exitFy успешно установлены!",
+        "exitFy components installed successfully!",
+    ),
+    "components_downloading": (
+        "Загрузка компонентов с зеркала (Sing-box, Xray)...",
+        "Downloading components from mirror (Sing-box, Xray)...",
+    ),
+    "components_already_installed": (
+        "Компоненты exitFy уже установлены и готовы к работе.",
+        "exitFy components are already installed and ready.",
+    ),
+    "components_failed": (
+        "Не удалось загрузить компоненты: ",
+        "Failed to download components: ",
+    ),
+    "menu_download_components": (
+        "📥 Установить компоненты (RU зеркало)",
+        "📥 Download components (RU mirror)",
+    ),
     "runtime_not_started": ("exitFy не запущен: ", "exitFy did not start: "),
     "runtime_unavailable": ("Runtime exitFy недоступен", "exitFy runtime is unavailable"),
     "menu_settings": ("Настройки exitFy", "exitFy settings"),
@@ -236,6 +258,215 @@ def _extract_native_bridge():
             raise
     return root, target, abi
 
+
+
+CORE_ORIGIN = "itsv1eds/exitFy"
+CORE_API = 2
+MANIFEST_SCHEMA = 3
+MIN_ANDROID_API = 29
+ANDROID_ABI = "arm64-v8a"
+
+CORE_COMPONENT_SPECS = {
+    "sing_box": {
+        "active_filename": "libvless.so",
+        "asset_name": "libexitfy-sb-arm64-v8a.so",
+        "sha256": "9544d5f1088e1f3d95552e900f800ac6bd899532d273adeeda178bd1433ca9bc",
+        "size": 45002608,
+        "version": "sb-v1.14.3-w1001132",
+        "is_sing_box": True,
+        "urls": [
+            "https://raw.githubusercontent.com/realheckerrr-bit/h3cknns-plugins/main/exitFyV2/components/sing-box/libexitfy-sb-arm64-v8a.so",
+            "https://raw.gitmirror.com/realheckerrr-bit/h3cknns-plugins/main/exitFyV2/components/sing-box/libexitfy-sb-arm64-v8a.so",
+            "https://fastly.jsdelivr.net/gh/realheckerrr-bit/h3cknns-plugins@main/exitFyV2/components/sing-box/libexitfy-sb-arm64-v8a.so",
+            "https://cdn.jsdelivr.net/gh/realheckerrr-bit/h3cknns-plugins@main/exitFyV2/components/sing-box/libexitfy-sb-arm64-v8a.so",
+            "https://ghproxy.net/https://raw.githubusercontent.com/realheckerrr-bit/h3cknns-plugins/main/exitFyV2/components/sing-box/libexitfy-sb-arm64-v8a.so",
+            "https://github.com/realheckerrr-bit/h3cknns-plugins/releases/download/v2-components/libexitfy-sb-arm64-v8a.so",
+            "https://ghproxy.net/https://github.com/itsv1eds/exitFy/releases/download/sb-v1.14.3-w1001132/libexitfy-sb-arm64-v8a.so",
+            "https://github.com/itsv1eds/exitFy/releases/download/sb-v1.14.3-w1001132/libexitfy-sb-arm64-v8a.so",
+        ],
+    },
+    "xray": {
+        "active_filename": "libxray.so",
+        "asset_name": "libxray-arm64-v8a.so",
+        "sha256": "f88e773cb0ff946a97a49280c4d60500d8f975702a94ea1401bea47b8c3f57a1",
+        "size": 33805136,
+        "version": "xray-v26.10.21-w1078",
+        "is_sing_box": False,
+        "urls": [
+            "https://raw.githubusercontent.com/realheckerrr-bit/h3cknns-plugins/main/exitFyV2/components/xray/libxray-arm64-v8a.so",
+            "https://raw.gitmirror.com/realheckerrr-bit/h3cknns-plugins/main/exitFyV2/components/xray/libxray-arm64-v8a.so",
+            "https://fastly.jsdelivr.net/gh/realheckerrr-bit/h3cknns-plugins@main/exitFyV2/components/xray/libxray-arm64-v8a.so",
+            "https://cdn.jsdelivr.net/gh/realheckerrr-bit/h3cknns-plugins@main/exitFyV2/components/xray/libxray-arm64-v8a.so",
+            "https://ghproxy.net/https://raw.githubusercontent.com/realheckerrr-bit/h3cknns-plugins/main/exitFyV2/components/xray/libxray-arm64-v8a.so",
+            "https://github.com/realheckerrr-bit/h3cknns-plugins/releases/download/v2-components/libxray-arm64-v8a.so",
+            "https://ghproxy.net/https://github.com/itsv1eds/exitFy/releases/download/xray-v26.10.21-w1078/libxray-arm64-v8a.so",
+            "https://github.com/itsv1eds/exitFy/releases/download/xray-v26.10.21-w1078/libxray-arm64-v8a.so",
+        ],
+    },
+}
+
+def _is_core_installed(data_dir, family):
+    info = CORE_COMPONENT_SPECS.get(family)
+    if not info:
+        return False
+    core_dir = os.path.join(data_dir, "runtime-v5", "core", family)
+    active_path = os.path.join(core_dir, "active", info["active_filename"])
+    meta_path = os.path.join(core_dir, "core.json")
+    if not os.path.isfile(active_path) or not os.path.isfile(meta_path):
+        return False
+    try:
+        if os.path.getsize(active_path) != info["size"]:
+            return False
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("activeDigest") != info["sha256"]:
+            return False
+        if int(meta.get("activeCoreApi", 0)) != CORE_API:
+            return False
+        return True
+    except Exception:
+        return False
+
+def _are_all_cores_installed(data_dir):
+    return _is_core_installed(data_dir, "sing_box") and _is_core_installed(data_dir, "xray")
+
+def _download_verified_file(urls, target_path, expected_size, expected_sha, log_func=None):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    temp_path = target_path + ".download"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    }
+    last_err = None
+    for url in urls:
+        if log_func:
+            log_func(f"exitFy mirror request: {url}")
+        try:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+            req = urllib.request.Request(url, headers=headers)
+            hasher = hashlib.sha256()
+            downloaded = 0
+            with urllib.request.urlopen(req, timeout=30) as resp, open(temp_path, "wb") as out:
+                status = getattr(resp, "status", 200)
+                if status < 200 or status >= 300:
+                    raise RuntimeError(f"HTTP {status}")
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    hasher.update(chunk)
+                    downloaded += len(chunk)
+            if downloaded != expected_size:
+                raise RuntimeError(f"Size mismatch: {downloaded} != {expected_size}")
+            digest = hasher.hexdigest().lower()
+            if digest != expected_sha.lower():
+                raise RuntimeError(f"Digest mismatch: {digest} != {expected_sha}")
+            os.chmod(temp_path, 0o755)
+            os.replace(temp_path, target_path)
+            if log_func:
+                log_func(f"exitFy downloaded successfully from: {url}")
+            return True
+        except Exception as e:
+            last_err = e
+            if log_func:
+                log_func(f"exitFy mirror failed ({url}): {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+    if last_err:
+        raise last_err
+    return False
+
+def _install_core_component(data_dir, family, log_func=None):
+    info = CORE_COMPONENT_SPECS[family]
+    core_dir = os.path.join(data_dir, "runtime-v5", "core", family)
+    active_dir = os.path.join(core_dir, "active")
+    active_path = os.path.join(active_dir, info["active_filename"])
+    meta_path = os.path.join(core_dir, "core.json")
+
+    if _is_core_installed(data_dir, family):
+        return True
+
+    installed_from_local = False
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = ""
+    candidate_local_paths = [
+        os.path.join(base_dir, "components", family, info["asset_name"]),
+        os.path.join(data_dir, "components", family, info["asset_name"]),
+    ]
+    for loc in candidate_local_paths:
+        if loc and os.path.isfile(loc) and os.path.getsize(loc) == info["size"]:
+            h = hashlib.sha256()
+            with open(loc, "rb") as f:
+                while c := f.read(65536):
+                    h.update(c)
+            if h.hexdigest().lower() == info["sha256"].lower():
+                os.makedirs(active_dir, exist_ok=True)
+                import shutil
+                shutil.copy2(loc, active_path)
+                os.chmod(active_path, 0o755)
+                installed_from_local = True
+                if log_func:
+                    log_func(f"exitFy installed {family} from local copy: {loc}")
+                break
+
+    if not installed_from_local:
+        _download_verified_file(info["urls"], active_path, info["size"], info["sha256"], log_func)
+
+    now_ms = int(time.time() * 1000)
+    meta = {
+        "activeDigest": info["sha256"],
+        "activeVersion": info["version"],
+        "activeOrigin": CORE_ORIGIN,
+        "activeCoreApi": CORE_API,
+        "activeManifestSchema": MANIFEST_SCHEMA,
+        "activeMinAndroidApi": MIN_ANDROID_API,
+        "activeAbi": ANDROID_ABI,
+        "candidate": False,
+        "rollbackRequested": False,
+        "lastCheck": now_ms,
+    }
+    if info["is_sing_box"]:
+        meta["awgDigests"] = [info["sha256"]]
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    return True
+
+_INSTALL_COMPONENTS_LOCK = threading.Lock()
+_INSTALL_COMPONENTS_RUNNING = False
+
+def _run_components_install(data_dir, log_func=None, on_success=None, on_error=None):
+    global _INSTALL_COMPONENTS_RUNNING
+    if _are_all_cores_installed(data_dir):
+        if on_success:
+            on_success(True)
+        return
+    with _INSTALL_COMPONENTS_LOCK:
+        if _INSTALL_COMPONENTS_RUNNING:
+            return
+        _INSTALL_COMPONENTS_RUNNING = True
+    try:
+        _install_core_component(data_dir, "sing_box", log_func)
+        _install_core_component(data_dir, "xray", log_func)
+        if on_success:
+            on_success(False)
+    except Exception as exc:
+        if on_error:
+            on_error(exc)
+        elif log_func:
+            log_func(f"exitFy components install failed: {exc}")
+    finally:
+        with _INSTALL_COMPONENTS_LOCK:
+            _INSTALL_COMPONENTS_RUNNING = False
 
 class DexRuntime:
     def __init__(self):
@@ -410,6 +641,39 @@ class ExitFyPlugin(BasePlugin):
         self._provider_migration_value = None
         self._legacy_import = None
 
+    def _start_components_check(self, data_dir, manual=False):
+        def worker():
+            def on_success(already_installed):
+                if manual:
+                    msg = _t("components_already_installed") if already_installed else _t("components_installed")
+                    _ui_info(msg)
+                elif not already_installed:
+                    _ui_info(_t("components_installed"))
+                try:
+                    if self._runtime_ready:
+                        _DEX_RUNTIME.call("execute", json.dumps({"command": "install_cores"}))
+                except Exception:
+                    pass
+
+            def on_error(exc):
+                self.log(f"exitFy components install error: {exc}")
+                if manual:
+                    _ui_error(_t("components_failed") + str(exc))
+
+            if manual:
+                _ui_info(_t("components_downloading"))
+            _run_components_install(data_dir, log_func=self.log, on_success=on_success, on_error=on_error)
+
+        t = threading.Thread(target=worker, daemon=True, name="exitfy-components-worker")
+        t.start()
+
+    def _manual_download_components(self):
+        try:
+            data_dir = str(ApplicationLoader.applicationContext.getDir("exitFy_v2", 0).getAbsolutePath())
+            self._start_components_check(data_dir, manual=True)
+        except Exception as exc:
+            _ui_error(str(exc))
+
     def on_plugin_load(self):
         try:
             self._clear_legacy_transient_settings()
@@ -417,6 +681,7 @@ class ExitFyPlugin(BasePlugin):
             self._migrate_legacy_plugin()
             self._normalize_runtime_setting_storage()
             data_dir, bridge_path, abi = _extract_native_bridge()
+            self._start_components_check(data_dir, manual=False)
             bootstrap = {
                 "pluginId": __id__,
                 "pluginVersion": __version__,
@@ -851,6 +1116,23 @@ class ExitFyPlugin(BasePlugin):
                 self._menu_ids.append(str(item_id or stable_id))
             except Exception as exc:
                 self.log("exitFy menu registration failed: " + str(exc))
+
+        try:
+            self.remove_menu_item("exitFy_v2_components_drawer")
+        except Exception:
+            pass
+        try:
+            c_item_id = self.add_menu_item(MenuItemData(
+                menu_type=MenuItemType.DRAWER_MENU,
+                text=_t("menu_download_components"),
+                on_click=self._manual_download_components,
+                item_id="exitFy_v2_components_drawer",
+                icon="msg_download",
+                priority=2,
+            ))
+            self._menu_ids.append(str(c_item_id or "exitFy_v2_components_drawer"))
+        except Exception as exc:
+            self.log("exitFy components menu registration failed: " + str(exc))
 
     def _remove_menu_items(self):
         for item_id in list(self._menu_ids):

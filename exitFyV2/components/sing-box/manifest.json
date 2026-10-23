@@ -1,0 +1,48 @@
+{
+  "schema": 3,
+  "coreApi": 2,
+  "configContract": 1,
+  "family": "sing_box",
+  "releaseTag": "sb-v1.14.3-w1001132",
+  "upstream": {
+    "repository": "SagerNet/sing-box",
+    "tag": "v1.14.3",
+    "commit": "7054cac5124465ffdb145870d7c01885566711b1",
+    "goVersion": "1.25.5"
+  },
+  "wrapper": {
+    "repository": "itsv1eds/exitFy",
+    "commit": "ed02f2d4d154c697b4063ddd50a3f75333a450f8",
+    "ndkVersion": "27.2.12479018",
+    "buildTags": [
+      "badlinkname",
+      "tfogo_checklinkname0",
+      "with_quic",
+      "with_utls"
+    ],
+    "sourceBundle": {
+      "name": "exitfy-sb-v1.14.3-source.tar.gz",
+      "size": 5745877,
+      "sha256": "3dd43f994053fc5322f338f13ab82613d6c84d420c29ff026180d12286d5d934"
+    }
+  },
+  "minAndroidApi": 29,
+  "requiredExports": [
+    "StartCore",
+    "StopCore"
+  ],
+  "assets": {
+    "arm64-v8a": {
+      "name": "libexitfy-sb-arm64-v8a.so",
+      "size": 45002608,
+      "sha256": "9544d5f1088e1f3d95552e900f800ac6bd899532d273adeeda178bd1433ca9bc",
+      "elfClass": 64,
+      "elfMachine": 183,
+      "elfMachineName": "EM_AARCH64",
+      "exports": [
+        "StartCore",
+        "StopCore"
+      ]
+    }
+  }
+}

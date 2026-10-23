@@ -1,0 +1,35 @@
+{
+  "schema": 3,
+  "coreApi": 2,
+  "configContract": 1,
+  "family": "xray",
+  "releaseTag": "xray-v26.10.21-w1078",
+  "upstream": {
+    "repository": "XTLS/libXray",
+    "tag": "v26.10.21",
+    "commit": "dbe95129fa96689c4643ddca52c278448eec6df1"
+  },
+  "wrapper": {
+    "repository": "itsv1eds/exitFy",
+    "commit": "e79505f4aaeb7df80cad755a12f6683dd60fbd87"
+  },
+  "minAndroidApi": 29,
+  "requiredExports": [
+    "StartCore",
+    "StopCore"
+  ],
+  "assets": {
+    "arm64-v8a": {
+      "name": "libxray-arm64-v8a.so",
+      "size": 33805136,
+      "sha256": "f88e773cb0ff946a97a49280c4d60500d8f975702a94ea1401bea47b8c3f57a1",
+      "elfClass": 64,
+      "elfMachine": 183,
+      "elfMachineName": "EM_AARCH64",
+      "exports": [
+        "StartCore",
+        "StopCore"
+      ]
+    }
+  }
+}
