@@ -1,0 +1,686 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+import threading
+import time
+from typing import Any, List, Optional
+
+from base_plugin import (
+    AppEvent,
+    BasePlugin,
+    MethodHook,
+)
+from hook_utils import find_class
+from android_utils import run_on_ui_thread
+from client_utils import get_last_fragment
+from ui.bulletin import BulletinHelper
+from ui.settings import (
+    Divider,
+    Header,
+    Input,
+    Selector,
+    Switch,
+    Text,
+)
+
+from java import jclass
+from org.telegram.messenger import ApplicationLoader
+
+__id__ = "ios_styled_screenshot"
+__name__ = "iOS Styled Screenshot"
+__description__ = "Customizable iOS-style Dynamic Island pill under the camera with client icons for screenshots"
+__author__ = "@h3cknn"
+__version__ = "1.0.0"
+__icon__ = "ios_pill/1"
+__app_version__ = ">=10.0.0"
+__sdk_version__ = ">=1.4.0.0"
+__permissions__ = [
+    "settings",
+    "hooks",
+]
+
+# Client Types
+CLIENT_AUTO = "auto"
+CLIENT_EXTERALESS = "exteraless"
+CLIENT_EXTERAGRAM = "exteragram"
+CLIENT_AYUGRAM = "ayugram"
+CLIENT_SWIFTGRAM = "swiftgram"
+CLIENT_CUSTOM = "custom"
+
+
+def detect_host_client() -> str:
+    """Detects the underlying Telegram client variant."""
+    try:
+        context = ApplicationLoader.applicationContext
+        pkg = context.getPackageName().lower()
+    except Exception:
+        pkg = ""
+
+    # Check known classes
+    try:
+        jclass("com.radityalabs.ayugram.AyuConstants")
+        return CLIENT_AYUGRAM
+    except Exception:
+        pass
+
+    try:
+        jclass("com.exteraless.ExteralessConfig")
+        return CLIENT_EXTERALESS
+    except Exception:
+        pass
+
+    try:
+        jclass("com.extera.telegram.ExteraConfig")
+        if "exteraless" in pkg:
+            return CLIENT_EXTERALESS
+        return CLIENT_EXTERAGRAM
+    except Exception:
+        pass
+
+    if "ayugram" in pkg:
+        return CLIENT_AYUGRAM
+    if "exteraless" in pkg:
+        return CLIENT_EXTERALESS
+    if "extera" in pkg:
+        return CLIENT_EXTERAGRAM
+
+    return CLIENT_EXTERALESS
+
+
+def resolve_client_icon_drawable(client_type: str, custom_name: Optional[str] = None):
+    """
+    Dynamically loads drawables from the host client APK package.
+    Resolves client-specific brand icons (exteraless, AyuGram, exteraGram)
+    or fallback launcher / Telegram resources.
+    """
+    try:
+        context = ApplicationLoader.applicationContext
+        res = context.getResources()
+        pkg = context.getPackageName()
+    except Exception:
+        return None
+
+    candidates = []
+    if custom_name and custom_name.strip():
+        candidates.append(custom_name.strip())
+
+    resolved_client = client_type
+    if resolved_client == CLIENT_AUTO:
+        resolved_client = detect_host_client()
+
+    if resolved_client == CLIENT_EXTERALESS:
+        candidates.extend([
+            "exteraless_logo",
+            "ic_exteraless",
+            "ic_exteraless_round",
+            "extera_logo",
+            "ic_extera",
+            "ic_launcher_round",
+            "ic_launcher",
+            "msg_telegram",
+        ])
+    elif resolved_client == CLIENT_AYUGRAM:
+        candidates.extend([
+            "ayugram_logo",
+            "ic_ayugram",
+            "ayu_logo",
+            "ic_ghost",
+            "ic_launcher_round",
+            "ic_launcher",
+            "msg_telegram",
+        ])
+    elif resolved_client == CLIENT_EXTERAGRAM:
+        candidates.extend([
+            "extera_logo",
+            "ic_extera",
+            "ic_extera_round",
+            "ic_launcher_round",
+            "ic_launcher",
+            "msg_telegram",
+        ])
+    elif resolved_client == CLIENT_SWIFTGRAM:
+        candidates.extend([
+            "msg_send",
+            "msg_telegram",
+            "ic_ab_other",
+            "ic_launcher_round",
+            "ic_launcher",
+        ])
+    else:
+        candidates.extend([
+            "ic_launcher_round",
+            "ic_launcher",
+            "msg_telegram",
+        ])
+
+    for name in candidates:
+        try:
+            res_id = res.getIdentifier(name, "drawable", pkg)
+            if res_id != 0:
+                drawable = res.getDrawable(res_id, context.getTheme())
+                if drawable is not None:
+                    return drawable
+        except Exception:
+            continue
+
+    # Fallback to application icon
+    try:
+        app_info = context.getApplicationInfo()
+        return context.getPackageManager().getApplicationIcon(app_info)
+    except Exception:
+        return None
+
+
+class IosStyledScreenshotPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.pill_view = None
+        self.active_activity = None
+        self.observer = None
+        self.screen_capture_callback = None
+        self._is_dragging = False
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+
+    def on_plugin_load(self):
+        """Plugin entry point when enabled."""
+        run_on_ui_thread(self._attach_pill_to_active_window)
+        self._setup_screenshot_observer()
+
+    def on_plugin_unload(self):
+        """Cleanup view and unregister listeners when disabled."""
+        self._remove_screenshot_observer()
+        run_on_ui_thread(self._detach_pill)
+
+    def on_app_event(self, event: AppEvent):
+        """Handle lifecycle events."""
+        if event == AppEvent.RESUME:
+            run_on_ui_thread(self._attach_pill_to_active_window)
+        elif event == AppEvent.STOP or event == AppEvent.PAUSE:
+            pass
+
+    # -------------------------------------------------------------------------
+    # Settings Management
+    # -------------------------------------------------------------------------
+
+    def create_settings(self) -> List[Any]:
+        return [
+            Header(text="iOS Pill Placement & Display"),
+            Switch(
+                key="enabled",
+                text="Enable iOS Camera Pill",
+                default=True,
+                subtext="Displays the sleek capsule under your front camera cutout",
+            ),
+            Input(
+                key="offset_y",
+                text="Offset Y (Vertical in dp)",
+                default="24",
+                subtext="Adjust to fit right beneath your front camera punch hole",
+            ),
+            Input(
+                key="offset_x",
+                text="Offset X (Horizontal in dp)",
+                default="0",
+                subtext="0 is centered under camera. Positive moves right, negative moves left",
+            ),
+            Switch(
+                key="enable_drag",
+                text="Draggable Placement",
+                default=True,
+                subtext="Drag the pill directly on screen to align with camera cutout",
+            ),
+            Divider(),
+            Header(text="Branding & Client Icons"),
+            Selector(
+                key="client_preset",
+                text="Client Icon Preset",
+                default=CLIENT_AUTO,
+                options=[
+                    (CLIENT_AUTO, "Auto Detect Client"),
+                    (CLIENT_EXTERALESS, "exteraless"),
+                    (CLIENT_EXTERAGRAM, "exteraGram"),
+                    (CLIENT_AYUGRAM, "AyuGram"),
+                    (CLIENT_SWIFTGRAM, "Swiftgram (iOS)"),
+                    (CLIENT_CUSTOM, "Custom Resource"),
+                ],
+            ),
+            Input(
+                key="pill_text",
+                text="Header Text",
+                default="Swiftgram",
+                subtext="Primary label inside the capsule (e.g. Swiftgram, exteraless, AyuGram)",
+            ),
+            Input(
+                key="pill_subtext",
+                text="Subtext / Indicator",
+                default="• now",
+                subtext="Optional secondary badge (leave empty to hide)",
+            ),
+            Input(
+                key="custom_icon_name",
+                text="Custom Drawable Name",
+                default="",
+                subtext="Specify APK drawable name when using Custom Resource preset",
+            ),
+            Switch(
+                key="show_icon",
+                text="Show Client Icon",
+                default=True,
+                subtext="Display client branding icon on the left side of the pill",
+            ),
+            Switch(
+                key="show_dot",
+                text="Show Camera Accent Dot",
+                default=True,
+                subtext="Displays subtle iOS green/amber sensor indicator dot",
+            ),
+            Divider(),
+            Header(text="Screenshot Capture Integration"),
+            Switch(
+                key="screenshot_pulse",
+                text="Screenshot Pulse Animation",
+                default=True,
+                subtext="Expands and pulses the capsule when a screenshot is detected",
+            ),
+            Switch(
+                key="show_bulletin",
+                text="Show Screenshot Bulletin",
+                default=True,
+                subtext="Show stylish Telegram notification popup after screenshot",
+            ),
+            Divider(),
+            Text(
+                text="About iOS Styled Screenshot",
+                subtext="Inspired by Swiftgram iOS screenshot capsules. Automatically resolves APK drawables across exteraless, exteraGram, and AyuGram.",
+            ),
+        ]
+
+    # -------------------------------------------------------------------------
+    # View Creation & UI Logic
+    # -------------------------------------------------------------------------
+
+    def _get_setting_int(self, key: str, default: int) -> int:
+        val = self.get_setting(key, str(default))
+        try:
+            return int(str(val).strip())
+        except (ValueError, TypeError):
+            return default
+
+    def _get_active_activity(self):
+        try:
+            fragment = get_last_fragment()
+            if fragment and hasattr(fragment, "getParentActivity"):
+                act = fragment.getParentActivity()
+                if act:
+                    return act
+        except Exception:
+            pass
+
+        try:
+            LaunchActivity = jclass("org.telegram.ui.LaunchActivity")
+            if hasattr(LaunchActivity, "instance") and LaunchActivity.instance:
+                return LaunchActivity.instance
+        except Exception:
+            pass
+
+        return None
+
+    def _attach_pill_to_active_window(self):
+        """Attaches or updates the capsule View inside the Activity decor view."""
+        if not self.get_setting("enabled", True):
+            self._detach_pill()
+            return
+
+        activity = self._get_active_activity()
+        if not activity:
+            return
+
+        self.active_activity = activity
+        decor_view = activity.getWindow().getDecorView()
+        if not decor_view:
+            return
+
+        # If pill already attached to a different window, detach first
+        if self.pill_view and self.pill_view.getParent():
+            if self.pill_view.getParent() != decor_view:
+                self.pill_view.getParent().removeView(self.pill_view)
+                self.pill_view = None
+
+        if not self.pill_view:
+            self.pill_view = self._build_pill_view(activity)
+            if not self.pill_view:
+                return
+
+        offset_x = self._get_setting_int("offset_x", 0)
+        offset_y = self._get_setting_int("offset_y", 24)
+
+        AndroidUtilities = jclass("org.telegram.messenger.AndroidUtilities")
+        FrameLayout = jclass("android.widget.FrameLayout")
+        Gravity = jclass("android.view.Gravity")
+
+        params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+        )
+        params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL
+        params.topMargin = AndroidUtilities.dp(offset_y)
+        params.leftMargin = AndroidUtilities.dp(offset_x)
+
+        if not self.pill_view.getParent():
+            decor_view.addView(self.pill_view, params)
+        else:
+            self.pill_view.setLayoutParams(params)
+            self.pill_view.requestLayout()
+
+    def _detach_pill(self):
+        """Removes the capsule View from the window."""
+        if self.pill_view:
+            try:
+                parent = self.pill_view.getParent()
+                if parent:
+                    parent.removeView(self.pill_view)
+            except Exception:
+                pass
+            self.pill_view = None
+
+    def _build_pill_view(self, context):
+        """Constructs the native Android iOS capsule view hierarchy."""
+        try:
+            AndroidUtilities = jclass("org.telegram.messenger.AndroidUtilities")
+            LinearLayout = jclass("android.widget.LinearLayout")
+            TextView = jclass("android.widget.TextView")
+            ImageView = jclass("android.widget.ImageView")
+            GradientDrawable = jclass("android.graphics.drawable.GradientDrawable")
+            Color = jclass("android.graphics.Color")
+            Gravity = jclass("android.view.Gravity")
+            View = jclass("android.view.View")
+            Typeface = jclass("android.graphics.Typeface")
+        except Exception:
+            return None
+
+        # Main Capsule Container
+        pill = LinearLayout(context)
+        pill.setOrientation(LinearLayout.HORIZONTAL)
+        pill.setGravity(Gravity.CENTER_VERTICAL)
+        pill.setPadding(
+            AndroidUtilities.dp(10),
+            AndroidUtilities.dp(5),
+            AndroidUtilities.dp(10),
+            AndroidUtilities.dp(5),
+        )
+
+        # iOS Style Glassmorphic Background
+        bg = GradientDrawable()
+        bg.setShape(GradientDrawable.RECTANGLE)
+        bg.setCornerRadius(float(AndroidUtilities.dp(30)))
+        bg.setColor(Color.parseColor("#E60D0D11"))  # Ultra deep sleek black
+        bg.setStroke(AndroidUtilities.dp(1), Color.parseColor("#38FFFFFF"))  # Subtle translucent rim
+        pill.setBackground(bg)
+        pill.setElevation(float(AndroidUtilities.dp(6)))
+
+        # 1. Client Icon
+        show_icon = self.get_setting("show_icon", True)
+        if show_icon:
+            preset = self.get_setting("client_preset", CLIENT_AUTO)
+            custom_name = self.get_setting("custom_icon_name", "")
+            icon_drawable = resolve_client_icon_drawable(preset, custom_name)
+
+            if icon_drawable:
+                icon_view = ImageView(context)
+                icon_view.setImageDrawable(icon_drawable)
+                icon_view.setScaleType(ImageView.ScaleType.FIT_CENTER)
+
+                icon_params = LinearLayout.LayoutParams(
+                    AndroidUtilities.dp(16),
+                    AndroidUtilities.dp(16),
+                )
+                icon_params.rightMargin = AndroidUtilities.dp(6)
+                icon_params.gravity = Gravity.CENTER_VERTICAL
+                pill.addView(icon_view, icon_params)
+
+        # 2. Primary Header Text
+        header_text = self.get_setting("pill_text", "Swiftgram")
+        title_view = TextView(context)
+        title_view.setText(str(header_text))
+        title_view.setTextSize(12.5)
+        title_view.setTextColor(Color.WHITE)
+        title_view.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD))
+        title_view.setSingleLine(True)
+
+        title_params = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        title_params.gravity = Gravity.CENTER_VERTICAL
+        pill.addView(title_view, title_params)
+
+        # 3. Optional Subtext / Badge
+        subtext = self.get_setting("pill_subtext", "• now")
+        if subtext and str(subtext).strip():
+            sub_view = TextView(context)
+            sub_view.setText(str(subtext).strip())
+            sub_view.setTextSize(11.0)
+            sub_view.setTextColor(Color.parseColor("#A0FFFFFF"))
+            sub_view.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL))
+            sub_view.setSingleLine(True)
+
+            sub_params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            sub_params.leftMargin = AndroidUtilities.dp(5)
+            sub_params.gravity = Gravity.CENTER_VERTICAL
+            pill.addView(sub_view, sub_params)
+
+        # 4. Sensor / Camera Accent Dot
+        if self.get_setting("show_dot", True):
+            dot_view = View(context)
+            dot_bg = GradientDrawable()
+            dot_bg.setShape(GradientDrawable.OVAL)
+            dot_bg.setColor(Color.parseColor("#34C759"))  # iOS privacy green
+            dot_view.setBackground(dot_bg)
+
+            dot_params = LinearLayout.LayoutParams(
+                AndroidUtilities.dp(5),
+                AndroidUtilities.dp(5),
+            )
+            dot_params.leftMargin = AndroidUtilities.dp(7)
+            dot_params.gravity = Gravity.CENTER_VERTICAL
+            pill.addView(dot_view, dot_params)
+
+        # Touch & Drag Support
+        self._setup_touch_listener(pill)
+
+        return pill
+
+    def _setup_touch_listener(self, view):
+        """Allows direct drag-and-drop to position the pill under the camera cutout."""
+        try:
+            MotionEvent = jclass("android.view.MotionEvent")
+            ViewOnTouchListener = jclass("android.view.View$OnTouchListener")
+            AndroidUtilities = jclass("org.telegram.messenger.AndroidUtilities")
+            FrameLayout = jclass("android.widget.FrameLayout")
+        except Exception:
+            return
+
+        class DragListener:
+            def __init__(self, outer):
+                self.outer = outer
+
+            def onTouch(self, v, event):
+                if not self.outer.get_setting("enable_drag", True):
+                    return False
+
+                action = event.getAction()
+                raw_x = event.getRawX()
+                raw_y = event.getRawY()
+
+                if action == MotionEvent.ACTION_DOWN:
+                    self.outer._is_dragging = True
+                    self.outer._drag_start_x = raw_x - v.getX()
+                    self.outer._drag_start_y = raw_y - v.getY()
+                    return True
+
+                elif action == MotionEvent.ACTION_MOVE and self.outer._is_dragging:
+                    new_x = raw_x - self.outer._drag_start_x
+                    new_y = raw_y - self.outer._drag_start_y
+
+                    # Update translation
+                    v.setX(new_x)
+                    v.setY(new_y)
+                    return True
+
+                elif action == MotionEvent.ACTION_UP or action == MotionEvent.ACTION_CANCEL:
+                    self.outer._is_dragging = False
+                    # Calculate new offsets in dp
+                    try:
+                        parent = v.getParent()
+                        if parent:
+                            parent_width = parent.getWidth()
+                            # Center offset
+                            center_x = parent_width / 2.0
+                            current_x = v.getX() + (v.getWidth() / 2.0)
+                            diff_x_dp = int((current_x - center_x) / AndroidUtilities.density)
+                            diff_y_dp = max(0, int(v.getY() / AndroidUtilities.density))
+
+                            self.outer.set_setting("offset_x", str(diff_x_dp))
+                            self.outer.set_setting("offset_y", str(diff_y_dp))
+                    except Exception:
+                        pass
+                    return True
+
+                return False
+
+        try:
+            from extera_utils import create_proxy
+            proxy = create_proxy(ViewOnTouchListener, DragListener(self))
+            view.setOnTouchListener(proxy)
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------------------
+    # Screenshot Detection (Option 1.c)
+    # -------------------------------------------------------------------------
+
+    def _setup_screenshot_observer(self):
+        """Initializes system screenshot detection."""
+        if not self.get_setting("screenshot_pulse", True):
+            return
+
+        try:
+            context = ApplicationLoader.applicationContext
+            Build = jclass("android.os.Build")
+
+            # Method 1: Android 14+ ScreenCaptureCallback
+            if Build.VERSION.SDK_INT >= 34:
+                activity = self._get_active_activity()
+                if activity and hasattr(activity, "registerScreenCaptureCallback"):
+                    from java import dynamic_proxy
+                    ScreenCaptureCallback = jclass("android.app.Activity$ScreenCaptureCallback")
+
+                    class CaptureCallback:
+                        def __init__(self, outer):
+                            self.outer = outer
+
+                        def onScreenCaptured(self):
+                            self.outer._on_screenshot_captured()
+
+                    try:
+                        from extera_utils import create_proxy
+                        self.screen_capture_callback = create_proxy(
+                            ScreenCaptureCallback,
+                            CaptureCallback(self)
+                        )
+                        activity.registerScreenCaptureCallback(
+                            activity.getMainExecutor(),
+                            self.screen_capture_callback
+                        )
+                    except Exception:
+                        pass
+
+            # Method 2: MediaStore ContentObserver Fallback
+            self._start_media_observer(context)
+        except Exception:
+            pass
+
+    def _start_media_observer(self, context):
+        try:
+            MediaStore = jclass("android.provider.MediaStore")
+            Uri = jclass("android.net.Uri")
+            Handler = jclass("android.os.Handler")
+            Looper = jclass("android.os.Looper")
+            ContentObserver = jclass("android.database.ContentObserver")
+
+            class ScreenshotObserver:
+                def __init__(self, outer):
+                    self.outer = outer
+                    self.last_capture_time = 0
+
+                def onChange(self, selfChange, uri):
+                    now = time.time()
+                    if now - self.last_capture_time < 2.0:
+                        return
+                    self.last_capture_time = now
+                    self.outer._on_screenshot_captured()
+
+            from extera_utils import create_proxy
+            handler = Handler(Looper.getMainLooper())
+            self.observer = create_proxy(
+                ContentObserver,
+                ScreenshotObserver(self),
+                handler
+            )
+            context.getContentResolver().registerContentObserver(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                True,
+                self.observer
+            )
+        except Exception:
+            pass
+
+    def _remove_screenshot_observer(self):
+        try:
+            if self.observer:
+                context = ApplicationLoader.applicationContext
+                context.getContentResolver().unregisterContentObserver(self.observer)
+                self.observer = None
+        except Exception:
+            pass
+
+        try:
+            if self.screen_capture_callback and self.active_activity:
+                self.active_activity.unregisterScreenCaptureCallback(self.screen_capture_callback)
+                self.screen_capture_callback = None
+        except Exception:
+            pass
+
+    def _on_screenshot_captured(self):
+        """Called whenever screenshot is detected on the device."""
+        run_on_ui_thread(self._trigger_screenshot_effects)
+
+    def _trigger_screenshot_effects(self):
+        """Pulses the capsule and displays a feedback bulletin."""
+        if not self.pill_view:
+            return
+
+        try:
+            # Subtle iOS scale animation
+            self.pill_view.animate().scaleX(1.12).scaleY(1.12).setDuration(160).withEndAction(
+                jclass("java.lang.Runnable")(
+                    lambda: self.pill_view.animate().scaleX(1.0).scaleY(1.0).setDuration(180).start()
+                )
+            ).start()
+        except Exception:
+            pass
+
+        if self.get_setting("show_bulletin", True):
+            try:
+                fragment = get_last_fragment()
+                if fragment:
+                    BulletinHelper.show_success(
+                        fragment,
+                        "iOS Styled Screenshot captured!"
+                    )
+            except Exception:
+                pass
